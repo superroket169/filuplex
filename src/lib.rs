@@ -502,7 +502,8 @@ impl Operation {
 
         future.wait(None).unwrap();
 
-        return output.read().unwrap().to_vec();
+        let result = output.read().unwrap().to_vec();
+        result
     }
 
     pub fn run_relu(&self, a: &[f32]) -> Vec<f32> {
@@ -600,7 +601,8 @@ impl Operation {
 
         future.wait(None).unwrap();
 
-        return output.read().unwrap().to_vec();
+        let result = output.read().unwrap().to_vec();
+        result
     }
 
     pub fn run_matmul(&self, a: &[f32], b: &[f32], m: u32, k: u32, n: u32) -> Vec<f32> {
@@ -706,7 +708,8 @@ impl Operation {
 
         future.wait(None).unwrap();
 
-        return output.read().unwrap().to_vec();
+        let result = output.read().unwrap().to_vec();
+        result
     }
 
     pub fn run_softmax(&self, a: &[f32]) -> Vec<f32> {
