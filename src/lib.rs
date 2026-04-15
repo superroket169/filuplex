@@ -281,6 +281,37 @@ mod cs_relu {
     }
 }
 
+mod cs_softmax {
+    vulkano_shaders::shader! {
+        ty: "compute",
+        src: r"
+            #version 450
+            layout(local_size_x = 64) in;
+
+            layout(set = 0, binding = 0) buffer InputA { float a[]; };
+            layout(set = 0, binding = 1) buffer Output { float b[]; };
+            layout(set = 0, binding = 2) uniform Meta { uint length; };
+
+            void main() {
+                uint i = gl_GlobalInvocationID.x;
+                if (i >= length) return;
+
+                float max_val = a[0];
+                for (uint k = 1; k < length; k++) {
+                    max_val = max(max_val, a[k]);
+                }
+
+                float sum_exp = 0.0;
+                for (uint k = 0; k < length; k++) {
+                    sum_exp += exp(a[k] - max_val);
+                }
+
+                b[i] = exp(a[i] - max_val) / sum_exp;
+            }
+        ",
+    }
+}
+
 /* pub struct BuildInShaders {
     // shader :
     // other somthings
@@ -294,6 +325,7 @@ pub enum BuiltInShaderType {
     ModOperation,
     MatrisMul,
     Relu,
+    Softmax,
 }
 
 pub struct BuiltInShader {
@@ -322,6 +354,7 @@ impl BuiltInShader {
             BuiltInShaderType::ModOperation => cs_mod::load(ctx.device.clone()).unwrap(),
             BuiltInShaderType::MatrisMul => cs_matris_mul::load(ctx.device.clone()).unwrap(),
             BuiltInShaderType::Relu => cs_relu::load(ctx.device.clone()).unwrap(),
+            BuiltInShaderType::Softmax => cs_softmax::load(ctx.device.clone()).unwrap(),
         }
     }
 }
@@ -674,5 +707,98 @@ impl Operation {
         future.wait(None).unwrap();
 
         return output.read().unwrap().to_vec();
+    }
+
+    pub fn run_softmax(&self, a: &[f32]) -> Vec<f32> {
+        let alloc_info = AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_HOST
+                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+            ..Default::default()
+        };
+
+        let buff_info = BufferCreateInfo {
+            usage: BufferUsage::STORAGE_BUFFER,
+            ..Default::default()
+        };
+
+        let input_a = Buffer::from_iter(
+            self.context.memory_allocator.clone(),
+            buff_info.clone(),
+            alloc_info.clone(),
+            a.iter().copied(),
+        )
+        .expect("Buffer cannot be created");
+
+        let length_buf = Buffer::from_data(
+            self.context.memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::UNIFORM_BUFFER,
+                ..Default::default()
+            },
+            alloc_info.clone(),
+            a.len() as u32,
+        )
+        .expect("Length buffer cannot be created");
+
+        let output = Buffer::from_iter(
+            self.context.memory_allocator.clone(),
+            buff_info.clone(),
+            alloc_info.clone(),
+            vec![0.0f32; a.len() as usize],
+        )
+        .expect("Buffer cannot be created");
+
+        let descriptor_set_allocator = &self.context.descriptor_set_allocator;
+        let stage_layout = self.pipeline.layout().set_layouts().get(0).unwrap();
+
+        let descriptor_set = DescriptorSet::new(
+            descriptor_set_allocator.clone(),
+            stage_layout.clone(),
+            [
+                WriteDescriptorSet::buffer(0, input_a.clone()),
+                WriteDescriptorSet::buffer(1, output.clone()),
+                WriteDescriptorSet::buffer(2, length_buf.clone()),
+            ],
+            [],
+        )
+        .expect("Descriptor set cannot be created");
+
+        let command_buffer_allocator = &self.context.command_buffer_allocator;
+        let mut builder = AutoCommandBufferBuilder::primary(
+            command_buffer_allocator.clone(),
+            self.context.queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )
+        .unwrap();
+
+        let groups = (a.len() as u32 + 63) / 64;
+
+        unsafe {
+            builder
+                .bind_pipeline_compute(self.pipeline.clone())
+                .unwrap()
+                .bind_descriptor_sets(
+                    vulkano::pipeline::PipelineBindPoint::Compute,
+                    self.pipeline.layout().clone(),
+                    0,
+                    descriptor_set,
+                )
+                .unwrap()
+                .dispatch([groups, 1, 1])
+                .unwrap();
+        }
+
+        let command_buffer = builder.build().unwrap();
+
+        let future = sync::now(self.context.device.clone())
+            .then_execute(self.context.queue.clone(), command_buffer)
+            .unwrap()
+            .then_signal_fence_and_flush()
+            .unwrap();
+
+        future.wait(None).unwrap();
+
+        let result = output.read().unwrap().to_vec();
+        result
     }
 }
