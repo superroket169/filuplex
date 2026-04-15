@@ -1,0 +1,9 @@
+[package]
+name = "filuplex"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vulkano = "0.35.1"
+vulkano-shaders = "0.35.0"
+bytemuck = "1"
