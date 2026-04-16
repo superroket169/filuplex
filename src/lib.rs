@@ -95,7 +95,7 @@ impl Context {
 
         let queue = queues.next().expect("No queue");
 
-        println!("Logical device and queue ready!");
+        // println!("Logical device and queue ready!");
 
         // buffer sets:
         let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
@@ -431,6 +431,8 @@ pub enum BuiltInShaderType {
     Relu,
     Softmax,
     Transpose,
+    Sigmoid,
+    SigmoidDerivative,
 }
 
 pub struct BuiltInShader {
@@ -464,6 +466,10 @@ impl BuiltInShader {
             BuiltInShaderType::Relu => cs_relu::load(ctx.device.clone()).unwrap(),
             BuiltInShaderType::Softmax => cs_softmax::load(ctx.device.clone()).unwrap(),
             BuiltInShaderType::Transpose => cs_transpose::load(ctx.device.clone()).unwrap(),
+            BuiltInShaderType::Sigmoid => cs_sigmoid::load(ctx.device.clone()).unwrap(),
+            BuiltInShaderType::SigmoidDerivative => {
+                cs_sigmoid_derivative::load(ctx.device.clone()).unwrap()
+            }
         }
     }
 }
@@ -571,7 +577,7 @@ impl Operation {
         )
         .expect("Descriptor set cannot be created");
 
-        println!("Pipeline and descriptor set ready!");
+        // println!("Pipeline and descriptor set ready!");
 
         // ------- Dispatch --------
 
@@ -670,7 +676,7 @@ impl Operation {
         )
         .expect("Descriptor set cannot be created");
 
-        println!("Pipeline and descriptor set ready!");
+        // println!("Pipeline and descriptor set ready!");
 
         // ------- Dispatch --------
 
@@ -779,7 +785,7 @@ impl Operation {
         )
         .expect("Descriptor set cannot be created");
 
-        println!("Pipeline and descriptor set ready!");
+        // println!("Pipeline and descriptor set ready!");
 
         // ------- Dispatch --------
 
