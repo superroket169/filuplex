@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
@@ -17,30 +18,6 @@ use vulkano::pipeline::{Pipeline, PipelineLayout};
 use vulkano::shader::ShaderModule;
 use vulkano::sync::{self, GpuFuture};
 use vulkano::VulkanLibrary;
-
-/*
-let ctx = Contex::new(GpuPref::Default);
-let operation_sys = BuildInShaders::Multiple::new(/*first_buff_size*/2, /*second_buff_size*/2);
-let op = Operation::new(ctx, operation_sys);// like something
-let out = op.run([1.0, 2.0], [2.0, 3.0]);
-/* out = [2.0, 6.0]*/
-
-*/
-
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
 
 pub enum GpuPref {
     Default,
@@ -415,13 +392,31 @@ mod cs_matris_mul_transposed_b {
     }
 }
 
-/* pub struct BuildInShaders {
-    // shader :
-    // other somthings
-}*/
+mod cs_sqrt {
+    vulkano_shaders::shader! {
+        ty: "compute",
+        src: r"
+            #version 450
+            layout(local_size_x = 64) in;
+            layout(set = 0, binding = 0) buffer Input { float a[]; };
+            layout(set = 0, binding = 1) buffer Output { float b[]; };
+            layout(set = 0, binding = 2) uniform Meta { uint length; };
 
+            void main() {
+                uint i = gl_GlobalInvocationID.x;
+                if (i >= length) return;
+                
+                // Karekök hesaplama (Negatif sayı patlamasına karşı 0 sınırıyla korumalı)
+                b[i] = sqrt(max(a[i], 0.0));
+            }
+        ",
+    }
+}
+
+#[derive(Serialize, Deserialize)]
 pub enum BuiltInShaderType {
     Multiply,
+    Sqrt,
     Division,
     Addition,
     Subtraction,
@@ -439,14 +434,6 @@ pub struct BuiltInShader {
     pub shader_type: BuiltInShaderType,
 }
 
-// IDEA:
-/*
-pub enum ShaderSource {
-    BuiltIn(BuiltInShaderType),
-    Custom(Arc<ShaderModule>),  // kullanıcı kendi yükleyip veriyor
-}
-*/
-
 impl BuiltInShader {
     pub fn new(shader_type: BuiltInShaderType) -> Self {
         BuiltInShader { shader_type }
@@ -456,6 +443,7 @@ impl BuiltInShader {
         match self.shader_type {
             BuiltInShaderType::Addition => cs_add::load(ctx.device.clone()).unwrap(),
             BuiltInShaderType::Multiply => cs_mul::load(ctx.device.clone()).unwrap(),
+            BuiltInShaderType::Sqrt => cs_sqrt::load(ctx.device.clone()).unwrap(),
             BuiltInShaderType::Subtraction => cs_sub::load(ctx.device.clone()).unwrap(),
             BuiltInShaderType::Division => cs_div::load(ctx.device.clone()).unwrap(),
             BuiltInShaderType::ModOperation => cs_mod::load(ctx.device.clone()).unwrap(),

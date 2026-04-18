@@ -7,3 +7,5 @@ edition = "2021"
 vulkano = "0.35.1"
 vulkano-shaders = "0.35.0"
 bytemuck = "1"
+serde = { version = "1.0", features = ["derive"] }
+bincode = "1.3"
