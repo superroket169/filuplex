@@ -238,22 +238,23 @@ impl Operation {
             .wait(None)
             .expect("Fence wait failed");
     }
-    pub fn run(&self, a: &[f32], b: &[f32]) -> Vec<f32> {
+    pub fn run(&self, a: Subbuffer<[f32]>, b: Subbuffer<[f32]>) -> Subbuffer<[f32]> {
         let mut builder = self.new_builder();
 
-        let input_a = self.upload_input(&mut builder, a);
-        let input_b = self.upload_input(&mut builder, b);
-        let output = self.device_storage(a.len(), BufferUsage::TRANSFER_SRC);
+        let output = self.device_storage(
+            a.len() as usize,
+            BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC,
+        );
 
         let length_buf = self.uniform::<u32>(a.len() as u32);
-
+        let groups = (a.len() as u32 + 63) / 64;
         let stage_layout = self.pipeline.layout().set_layouts().get(0).unwrap();
         let descriptor_set = DescriptorSet::new(
             self.context.descriptor_set_allocator.clone(),
             stage_layout.clone(),
             [
-                WriteDescriptorSet::buffer(0, input_a),
-                WriteDescriptorSet::buffer(1, input_b),
+                WriteDescriptorSet::buffer(0, a),
+                WriteDescriptorSet::buffer(1, b),
                 WriteDescriptorSet::buffer(2, output.clone()),
                 WriteDescriptorSet::buffer(3, length_buf),
             ],
@@ -261,7 +262,6 @@ impl Operation {
         )
         .expect("Descriptor set cannot be created");
 
-        let groups = (a.len() as u32 + 63) / 64;
         unsafe {
             builder
                 .bind_pipeline_compute(self.pipeline.clone())
@@ -277,29 +277,25 @@ impl Operation {
                 .unwrap();
         }
 
-        let host_output = self.readback(&mut builder, output, a.len());
-
         self.submit_and_wait(builder);
-
-        let res = host_output
-            .read()
-            .expect("Readback buffer map failed")
-            .to_vec();
-        res
+        output
     }
-    pub fn run_relu(&self, a: &[f32]) -> Vec<f32> {
+    pub fn run_relu(&self, a: Subbuffer<[f32]>) -> Subbuffer<[f32]> {
         let mut builder = self.new_builder();
 
-        let input_a = self.upload_input(&mut builder, a);
-        let output = self.device_storage(a.len(), BufferUsage::TRANSFER_SRC);
+        let output = self.device_storage(
+            a.len() as usize,
+            BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC,
+        );
         let length_buf = self.uniform::<u32>(a.len() as u32);
 
+        let groups = (a.len() as u32 + 63) / 64;
         let stage_layout = self.pipeline.layout().set_layouts().get(0).unwrap();
         let descriptor_set = DescriptorSet::new(
             self.context.descriptor_set_allocator.clone(),
             stage_layout.clone(),
             [
-                WriteDescriptorSet::buffer(0, input_a),
+                WriteDescriptorSet::buffer(0, a),
                 WriteDescriptorSet::buffer(1, output.clone()),
                 WriteDescriptorSet::buffer(2, length_buf),
             ],
@@ -307,7 +303,6 @@ impl Operation {
         )
         .expect("Descriptor set cannot be created");
 
-        let groups = (a.len() as u32 + 63) / 64;
         unsafe {
             builder
                 .bind_pipeline_compute(self.pipeline.clone())
@@ -323,16 +318,20 @@ impl Operation {
                 .unwrap();
         }
 
-        let host_output = self.readback(&mut builder, output, a.len());
         self.submit_and_wait(builder);
-        let res = host_output.read().expect("Readback map failed").to_vec();
-        res
+
+        output
     }
-    pub fn run_matmul(&self, a: &[f32], b: &[f32], m: u32, k: u32, n: u32) -> Vec<f32> {
+    pub fn run_matmul(
+        &self,
+        a: Subbuffer<[f32]>,
+        b: Subbuffer<[f32]>,
+        m: u32,
+        k: u32,
+        n: u32,
+    ) -> Subbuffer<[f32]> {
         let mut builder = self.new_builder();
 
-        let input_a = self.upload_input(&mut builder, a);
-        let input_b = self.upload_input(&mut builder, b);
         let output = self.device_storage((m * n) as usize, BufferUsage::TRANSFER_SRC);
         let meta_buf = self.uniform::<MatMeta>(MatMeta { m, k, n });
 
@@ -341,8 +340,8 @@ impl Operation {
             self.context.descriptor_set_allocator.clone(),
             stage_layout.clone(),
             [
-                WriteDescriptorSet::buffer(0, input_a),
-                WriteDescriptorSet::buffer(1, input_b),
+                WriteDescriptorSet::buffer(0, a),
+                WriteDescriptorSet::buffer(1, b),
                 WriteDescriptorSet::buffer(2, output.clone()),
                 WriteDescriptorSet::buffer(3, meta_buf),
             ],
@@ -365,24 +364,27 @@ impl Operation {
                 .unwrap();
         }
 
-        let host_output = self.readback(&mut builder, output, (m * n) as usize);
         self.submit_and_wait(builder);
-        let res = host_output.read().expect("Readback map failed").to_vec();
-        res
+
+        output
     }
-    pub fn run_fn(&self, a: &[f32]) -> Vec<f32> {
+    pub fn run_fn(&self, a: Subbuffer<[f32]>) -> Subbuffer<[f32]> {
         let mut builder = self.new_builder();
 
-        let input_a = self.upload_input(&mut builder, a);
-        let output = self.device_storage(a.len(), BufferUsage::TRANSFER_SRC);
         let length_buf = self.uniform::<u32>(a.len() as u32);
 
+        let output = self.device_storage(
+            a.len() as usize,
+            BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC,
+        );
+
+        let groups = (a.len() as u32 + 63) / 64;
         let stage_layout = self.pipeline.layout().set_layouts().get(0).unwrap();
         let descriptor_set = DescriptorSet::new(
             self.context.descriptor_set_allocator.clone(),
             stage_layout.clone(),
             [
-                WriteDescriptorSet::buffer(0, input_a),
+                WriteDescriptorSet::buffer(0, a),
                 WriteDescriptorSet::buffer(1, output.clone()),
                 WriteDescriptorSet::buffer(2, length_buf),
             ],
@@ -390,7 +392,6 @@ impl Operation {
         )
         .expect("Descriptor set cannot be created");
 
-        let groups = (a.len() as u32 + 63) / 64;
         unsafe {
             builder
                 .bind_pipeline_compute(self.pipeline.clone())
@@ -406,9 +407,62 @@ impl Operation {
                 .unwrap();
         }
 
-        let host_output = self.readback(&mut builder, output, a.len());
         self.submit_and_wait(builder);
-        let res = host_output.read().expect("Readback map failed").to_vec();
-        res
+
+        output
+    }
+    pub fn run_matmul_relu(
+        &self,
+        a: Subbuffer<[f32]>,
+        b: Subbuffer<[f32]>,
+        m: u32,
+        k: u32,
+        n: u32,
+    ) -> Subbuffer<[f32]> {
+        let mut builder = self.new_builder();
+
+        let output = self.device_storage(
+            (m * n) as usize,
+            BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC,
+        );
+
+        let meta_buf = self.uniform::<MatMeta>(MatMeta { m, k, n });
+
+        let stage_layout = self.pipeline.layout().set_layouts().get(0).unwrap();
+
+        let descriptor_set = DescriptorSet::new(
+            self.context.descriptor_set_allocator.clone(),
+            stage_layout.clone(),
+            [
+                WriteDescriptorSet::buffer(0, a),
+                WriteDescriptorSet::buffer(1, b),
+                WriteDescriptorSet::buffer(2, output.clone()),
+                WriteDescriptorSet::buffer(3, meta_buf),
+            ],
+            [],
+        )
+        .unwrap();
+
+        let groups_x = (m + 7) / 8;
+        let groups_y = (n + 7) / 8;
+
+        unsafe {
+            builder
+                .bind_pipeline_compute(self.pipeline.clone())
+                .unwrap()
+                .bind_descriptor_sets(
+                    vulkano::pipeline::PipelineBindPoint::Compute,
+                    self.pipeline.layout().clone(),
+                    0,
+                    descriptor_set,
+                )
+                .unwrap()
+                .dispatch([groups_x, groups_y, 1])
+                .unwrap();
+        }
+
+        self.submit_and_wait(builder);
+
+        output
     }
 }
