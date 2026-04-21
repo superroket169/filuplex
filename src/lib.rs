@@ -1,8 +1,10 @@
+#![allow(dead_code)]
+
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage};
+use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
-use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage};
+use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferInfo};
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
 use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
 use vulkano::device::physical::PhysicalDevice;
@@ -17,7 +19,7 @@ use vulkano::pipeline::PipelineShaderStageCreateInfo;
 use vulkano::pipeline::{Pipeline, PipelineLayout};
 use vulkano::shader::ShaderModule;
 use vulkano::sync::{self, GpuFuture};
-use vulkano::VulkanLibrary;
+use vulkano::{DeviceSize, VulkanLibrary};
 
 pub enum GpuPref {
     Default,
@@ -44,11 +46,28 @@ impl Context {
         )
         .expect("Instance cannot be created");
 
-        let physical_device = instance
+        let physical_devices: Vec<_> = instance
             .enumerate_physical_devices()
             .expect("Cannot list GPUs")
-            .next()
-            .expect("No GPU found");
+            .collect();
+
+        assert!(!physical_devices.is_empty(), "No GPU found");
+
+        let physical_device = match &pref {
+            GpuPref::Default => physical_devices[0].clone(),
+            GpuPref::Index(i) => physical_devices
+                .get(*i)
+                .unwrap_or_else(|| panic!("GPU index {} out of range", i))
+                .clone(),
+            GpuPref::Discrete => physical_devices
+                .iter()
+                .find(|d| {
+                    d.properties().device_type
+                        == vulkano::device::physical::PhysicalDeviceType::DiscreteGpu
+                })
+                .unwrap_or(&physical_devices[0])
+                .clone(),
+        };
 
         println!("GPU: {}", physical_device.properties().device_name);
 
@@ -72,9 +91,6 @@ impl Context {
 
         let queue = queues.next().expect("No queue");
 
-        // println!("Logical device and queue ready!");
-
-        // buffer sets:
         let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
 
         let command_buffer_allocator = Arc::new(StandardCommandBufferAllocator::new(
@@ -501,85 +517,159 @@ impl Operation {
         }
     }
 
-    pub fn run(&self, a: &[f32], b: &[f32]) -> Vec<f32> {
-        let alloc_info = AllocationCreateInfo {
-            memory_type_filter: MemoryTypeFilter::PREFER_HOST
-                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-            ..Default::default()
-        };
+    // =========================================================================
+    //                         Internal helpers
+    // =========================================================================
 
-        let buff_info = BufferCreateInfo {
-            usage: BufferUsage::STORAGE_BUFFER,
-            ..Default::default()
-        };
-
-        let input_a = Buffer::from_iter(
+    fn staging_upload(&self, data: &[f32]) -> Subbuffer<[f32]> {
+        let buf = Buffer::new_slice::<f32>(
             self.context.memory_allocator.clone(),
-            buff_info.clone(),
-            alloc_info.clone(),
-            a.iter().copied(),
+            BufferCreateInfo {
+                usage: BufferUsage::TRANSFER_SRC,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_HOST
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            data.len() as DeviceSize,
         )
-        .expect("Buffer cannot be created");
+        .expect("Staging buffer cannot be created");
 
-        let length_buf = Buffer::from_data(
+        buf.write()
+            .expect("Staging buffer cannot be mapped")
+            .copy_from_slice(data);
+
+        buf
+    }
+
+    fn device_storage(&self, len: usize, extra_usage: BufferUsage) -> Subbuffer<[f32]> {
+        Buffer::new_slice::<f32>(
+            self.context.memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::STORAGE_BUFFER | extra_usage,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
+                ..Default::default()
+            },
+            len as DeviceSize,
+        )
+        .expect("Device storage buffer cannot be created")
+    }
+
+    fn upload_input(
+        &self,
+        builder: &mut AutoCommandBufferBuilder<vulkano::command_buffer::PrimaryAutoCommandBuffer>,
+        data: &[f32],
+    ) -> Subbuffer<[f32]> {
+        let staging = self.staging_upload(data);
+        let device_buf = self.device_storage(data.len(), BufferUsage::TRANSFER_DST);
+        builder
+            .copy_buffer(CopyBufferInfo::buffers(staging, device_buf.clone()))
+            .expect("copy_buffer failed");
+        device_buf
+    }
+
+    fn uniform<T>(&self, data: T) -> Subbuffer<T>
+    where
+        T: vulkano::buffer::BufferContents,
+    {
+        Buffer::from_data(
             self.context.memory_allocator.clone(),
             BufferCreateInfo {
                 usage: BufferUsage::UNIFORM_BUFFER,
                 ..Default::default()
             },
-            alloc_info.clone(),
-            a.len() as u32,
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_HOST
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            data,
         )
-        .expect("Length buffer cannot be created");
+        .expect("Uniform buffer cannot be created")
+    }
 
-        let input_b = Buffer::from_iter(
+    fn readback(
+        &self,
+        builder: &mut AutoCommandBufferBuilder<vulkano::command_buffer::PrimaryAutoCommandBuffer>,
+        device_output: Subbuffer<[f32]>,
+        len: usize,
+    ) -> Subbuffer<[f32]> {
+        let host_buf = Buffer::new_slice::<f32>(
             self.context.memory_allocator.clone(),
-            buff_info.clone(),
-            alloc_info.clone(),
-            b.iter().copied(),
+            BufferCreateInfo {
+                usage: BufferUsage::TRANSFER_DST,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_HOST
+                    | MemoryTypeFilter::HOST_RANDOM_ACCESS,
+                ..Default::default()
+            },
+            len as DeviceSize,
         )
-        .expect("Buffer cannot be created");
+        .expect("Readback buffer cannot be created");
 
-        let output = Buffer::from_iter(
-            self.context.memory_allocator.clone(),
-            buff_info.clone(),
-            alloc_info.clone(),
-            vec![0.0f32; a.len() as usize],
+        builder
+            .copy_buffer(CopyBufferInfo::buffers(device_output, host_buf.clone()))
+            .expect("copy_buffer readback failed");
+
+        host_buf
+    }
+
+    fn new_builder(
+        &self,
+    ) -> AutoCommandBufferBuilder<vulkano::command_buffer::PrimaryAutoCommandBuffer> {
+        AutoCommandBufferBuilder::primary(
+            self.context.command_buffer_allocator.clone(),
+            self.context.queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
         )
-        .expect("Buffer cannot be created");
+        .expect("Command buffer builder cannot be created")
+    }
 
-        let descriptor_set_allocator = &self.context.descriptor_set_allocator;
+    fn submit_and_wait(
+        &self,
+        builder: AutoCommandBufferBuilder<vulkano::command_buffer::PrimaryAutoCommandBuffer>,
+    ) {
+        let command_buffer = builder.build().expect("Command buffer build failed");
+        sync::now(self.context.device.clone())
+            .then_execute(self.context.queue.clone(), command_buffer)
+            .expect("Execute failed")
+            .then_signal_fence_and_flush()
+            .expect("Flush failed")
+            .wait(None)
+            .expect("Fence wait failed");
+    }
+
+    pub fn run(&self, a: &[f32], b: &[f32]) -> Vec<f32> {
+        let mut builder = self.new_builder();
+
+        let input_a = self.upload_input(&mut builder, a);
+        let input_b = self.upload_input(&mut builder, b);
+        let output = self.device_storage(a.len(), BufferUsage::TRANSFER_SRC);
+
+        let length_buf = self.uniform::<u32>(a.len() as u32);
 
         let stage_layout = self.pipeline.layout().set_layouts().get(0).unwrap();
-
         let descriptor_set = DescriptorSet::new(
-            descriptor_set_allocator.clone(),
+            self.context.descriptor_set_allocator.clone(),
             stage_layout.clone(),
             [
-                WriteDescriptorSet::buffer(0, input_a.clone()),
-                WriteDescriptorSet::buffer(1, input_b.clone()),
+                WriteDescriptorSet::buffer(0, input_a),
+                WriteDescriptorSet::buffer(1, input_b),
                 WriteDescriptorSet::buffer(2, output.clone()),
-                WriteDescriptorSet::buffer(3, length_buf.clone()),
+                WriteDescriptorSet::buffer(3, length_buf),
             ],
             [],
         )
         .expect("Descriptor set cannot be created");
 
-        // println!("Pipeline and descriptor set ready!");
-
-        // ------- Dispatch --------
-
-        let command_buffer_allocator = &self.context.command_buffer_allocator;
-
-        let mut builder = AutoCommandBufferBuilder::primary(
-            command_buffer_allocator.clone(),
-            self.context.queue.queue_family_index(),
-            CommandBufferUsage::OneTimeSubmit,
-        )
-        .unwrap();
-
         let groups = (a.len() as u32 + 63) / 64;
-
         unsafe {
             builder
                 .bind_pipeline_compute(self.pipeline.clone())
@@ -595,90 +685,38 @@ impl Operation {
                 .unwrap();
         }
 
-        let command_buffer = builder.build().unwrap();
+        let host_output = self.readback(&mut builder, output, a.len());
 
-        let future = sync::now(self.context.device.clone())
-            .then_execute(self.context.queue.clone(), command_buffer)
-            .unwrap()
-            .then_signal_fence_and_flush()
-            .unwrap();
+        self.submit_and_wait(builder);
 
-        future.wait(None).unwrap();
-
-        let result = output.read().unwrap().to_vec();
-        result
+        let res = host_output
+            .read()
+            .expect("Readback buffer map failed")
+            .to_vec();
+        res
     }
 
     pub fn run_relu(&self, a: &[f32]) -> Vec<f32> {
-        let alloc_info = AllocationCreateInfo {
-            memory_type_filter: MemoryTypeFilter::PREFER_HOST
-                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-            ..Default::default()
-        };
+        let mut builder = self.new_builder();
 
-        let buff_info = BufferCreateInfo {
-            usage: BufferUsage::STORAGE_BUFFER,
-            ..Default::default()
-        };
-
-        let input_a = Buffer::from_iter(
-            self.context.memory_allocator.clone(),
-            buff_info.clone(),
-            alloc_info.clone(),
-            a.iter().copied(),
-        )
-        .expect("Buffer cannot be created");
-
-        let length_buf = Buffer::from_data(
-            self.context.memory_allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::UNIFORM_BUFFER,
-                ..Default::default()
-            },
-            alloc_info.clone(),
-            a.len() as u32,
-        )
-        .expect("Length buffer cannot be created");
-
-        let output = Buffer::from_iter(
-            self.context.memory_allocator.clone(),
-            buff_info.clone(),
-            alloc_info.clone(),
-            vec![0.0f32; a.len() as usize],
-        )
-        .expect("Buffer cannot be created");
-
-        let descriptor_set_allocator = &self.context.descriptor_set_allocator;
+        let input_a = self.upload_input(&mut builder, a);
+        let output = self.device_storage(a.len(), BufferUsage::TRANSFER_SRC);
+        let length_buf = self.uniform::<u32>(a.len() as u32);
 
         let stage_layout = self.pipeline.layout().set_layouts().get(0).unwrap();
-
         let descriptor_set = DescriptorSet::new(
-            descriptor_set_allocator.clone(),
+            self.context.descriptor_set_allocator.clone(),
             stage_layout.clone(),
             [
-                WriteDescriptorSet::buffer(0, input_a.clone()),
+                WriteDescriptorSet::buffer(0, input_a),
                 WriteDescriptorSet::buffer(1, output.clone()),
-                WriteDescriptorSet::buffer(2, length_buf.clone()),
+                WriteDescriptorSet::buffer(2, length_buf),
             ],
             [],
         )
         .expect("Descriptor set cannot be created");
 
-        // println!("Pipeline and descriptor set ready!");
-
-        // ------- Dispatch --------
-
-        let command_buffer_allocator = &self.context.command_buffer_allocator;
-
-        let mut builder = AutoCommandBufferBuilder::primary(
-            command_buffer_allocator.clone(),
-            self.context.queue.queue_family_index(),
-            CommandBufferUsage::OneTimeSubmit,
-        )
-        .unwrap();
-
         let groups = (a.len() as u32 + 63) / 64;
-
         unsafe {
             builder
                 .bind_pipeline_compute(self.pipeline.clone())
@@ -694,97 +732,33 @@ impl Operation {
                 .unwrap();
         }
 
-        let command_buffer = builder.build().unwrap();
-
-        let future = sync::now(self.context.device.clone())
-            .then_execute(self.context.queue.clone(), command_buffer)
-            .unwrap()
-            .then_signal_fence_and_flush()
-            .unwrap();
-
-        future.wait(None).unwrap();
-
-        let result = output.read().unwrap().to_vec();
-        result
+        let host_output = self.readback(&mut builder, output, a.len());
+        self.submit_and_wait(builder);
+        let res = host_output.read().expect("Readback map failed").to_vec();
+        res
     }
 
     pub fn run_matmul(&self, a: &[f32], b: &[f32], m: u32, k: u32, n: u32) -> Vec<f32> {
-        let alloc_info = AllocationCreateInfo {
-            memory_type_filter: MemoryTypeFilter::PREFER_HOST
-                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-            ..Default::default()
-        };
+        let mut builder = self.new_builder();
 
-        let buff_info = BufferCreateInfo {
-            usage: BufferUsage::STORAGE_BUFFER,
-            ..Default::default()
-        };
-
-        let input_a = Buffer::from_iter(
-            self.context.memory_allocator.clone(),
-            buff_info.clone(),
-            alloc_info.clone(),
-            a.iter().copied(),
-        )
-        .expect("Buffer cannot be created");
-
-        let meta_buf = Buffer::from_data(
-            self.context.memory_allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::UNIFORM_BUFFER,
-                ..Default::default()
-            },
-            alloc_info.clone(),
-            MatMeta { m, k, n },
-        )
-        .expect("Meta buffer cannot be created");
-
-        let input_b = Buffer::from_iter(
-            self.context.memory_allocator.clone(),
-            buff_info.clone(),
-            alloc_info.clone(),
-            b.iter().copied(),
-        )
-        .expect("Buffer cannot be created");
-
-        let output = Buffer::from_iter(
-            self.context.memory_allocator.clone(),
-            buff_info.clone(),
-            alloc_info.clone(),
-            vec![0.0f32; (m * n) as usize],
-        )
-        .expect("Buffer cannot be created");
-
-        // Olması gereken:
-        let descriptor_set_allocator = &self.context.descriptor_set_allocator;
+        let input_a = self.upload_input(&mut builder, a);
+        let input_b = self.upload_input(&mut builder, b);
+        let output = self.device_storage((m * n) as usize, BufferUsage::TRANSFER_SRC);
+        let meta_buf = self.uniform::<MatMeta>(MatMeta { m, k, n });
 
         let stage_layout = self.pipeline.layout().set_layouts().get(0).unwrap();
-
         let descriptor_set = DescriptorSet::new(
-            descriptor_set_allocator.clone(),
+            self.context.descriptor_set_allocator.clone(),
             stage_layout.clone(),
             [
-                WriteDescriptorSet::buffer(0, input_a.clone()),
-                WriteDescriptorSet::buffer(1, input_b.clone()),
+                WriteDescriptorSet::buffer(0, input_a),
+                WriteDescriptorSet::buffer(1, input_b),
                 WriteDescriptorSet::buffer(2, output.clone()),
                 WriteDescriptorSet::buffer(3, meta_buf),
             ],
             [],
         )
         .expect("Descriptor set cannot be created");
-
-        // println!("Pipeline and descriptor set ready!");
-
-        // ------- Dispatch --------
-
-        let command_buffer_allocator = &self.context.command_buffer_allocator;
-
-        let mut builder = AutoCommandBufferBuilder::primary(
-            command_buffer_allocator.clone(),
-            self.context.queue.queue_family_index(),
-            CommandBufferUsage::OneTimeSubmit,
-        )
-        .unwrap();
 
         unsafe {
             builder
@@ -801,84 +775,33 @@ impl Operation {
                 .unwrap();
         }
 
-        let command_buffer = builder.build().unwrap();
-
-        let future = sync::now(self.context.device.clone())
-            .then_execute(self.context.queue.clone(), command_buffer)
-            .unwrap()
-            .then_signal_fence_and_flush()
-            .unwrap();
-
-        future.wait(None).unwrap();
-
-        let result = output.read().unwrap().to_vec();
-        result
+        let host_output = self.readback(&mut builder, output, (m * n) as usize);
+        self.submit_and_wait(builder);
+        let res = host_output.read().expect("Readback map failed").to_vec();
+        res
     }
 
     pub fn run_fn(&self, a: &[f32]) -> Vec<f32> {
-        let alloc_info = AllocationCreateInfo {
-            memory_type_filter: MemoryTypeFilter::PREFER_HOST
-                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-            ..Default::default()
-        };
+        let mut builder = self.new_builder();
 
-        let buff_info = BufferCreateInfo {
-            usage: BufferUsage::STORAGE_BUFFER,
-            ..Default::default()
-        };
+        let input_a = self.upload_input(&mut builder, a);
+        let output = self.device_storage(a.len(), BufferUsage::TRANSFER_SRC);
+        let length_buf = self.uniform::<u32>(a.len() as u32);
 
-        let input_a = Buffer::from_iter(
-            self.context.memory_allocator.clone(),
-            buff_info.clone(),
-            alloc_info.clone(),
-            a.iter().copied(),
-        )
-        .expect("Buffer cannot be created");
-
-        let length_buf = Buffer::from_data(
-            self.context.memory_allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::UNIFORM_BUFFER,
-                ..Default::default()
-            },
-            alloc_info.clone(),
-            a.len() as u32,
-        )
-        .expect("Length buffer cannot be created");
-
-        let output = Buffer::from_iter(
-            self.context.memory_allocator.clone(),
-            buff_info.clone(),
-            alloc_info.clone(),
-            vec![0.0f32; a.len() as usize],
-        )
-        .expect("Buffer cannot be created");
-
-        let descriptor_set_allocator = &self.context.descriptor_set_allocator;
         let stage_layout = self.pipeline.layout().set_layouts().get(0).unwrap();
-
         let descriptor_set = DescriptorSet::new(
-            descriptor_set_allocator.clone(),
+            self.context.descriptor_set_allocator.clone(),
             stage_layout.clone(),
             [
-                WriteDescriptorSet::buffer(0, input_a.clone()),
+                WriteDescriptorSet::buffer(0, input_a),
                 WriteDescriptorSet::buffer(1, output.clone()),
-                WriteDescriptorSet::buffer(2, length_buf.clone()),
+                WriteDescriptorSet::buffer(2, length_buf),
             ],
             [],
         )
         .expect("Descriptor set cannot be created");
 
-        let command_buffer_allocator = &self.context.command_buffer_allocator;
-        let mut builder = AutoCommandBufferBuilder::primary(
-            command_buffer_allocator.clone(),
-            self.context.queue.queue_family_index(),
-            CommandBufferUsage::OneTimeSubmit,
-        )
-        .unwrap();
-
         let groups = (a.len() as u32 + 63) / 64;
-
         unsafe {
             builder
                 .bind_pipeline_compute(self.pipeline.clone())
@@ -894,17 +817,9 @@ impl Operation {
                 .unwrap();
         }
 
-        let command_buffer = builder.build().unwrap();
-
-        let future = sync::now(self.context.device.clone())
-            .then_execute(self.context.queue.clone(), command_buffer)
-            .unwrap()
-            .then_signal_fence_and_flush()
-            .unwrap();
-
-        future.wait(None).unwrap();
-
-        let result = output.read().unwrap().to_vec();
-        result
+        let host_output = self.readback(&mut builder, output, a.len());
+        self.submit_and_wait(builder);
+        let res = host_output.read().expect("Readback map failed").to_vec();
+        res
     }
 }
