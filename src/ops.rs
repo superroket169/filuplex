@@ -12,7 +12,7 @@ use vulkano::sync::{self, GpuFuture};
 use vulkano::DeviceSize;
 
 use crate::context::Context;
-use crate::shaders::*; // shaders.rs içindeki tüm pub modülleri görünür yapar
+use crate::shaders::*;
 
 #[derive(Serialize, Deserialize)]
 pub enum BuiltInShaderType {
