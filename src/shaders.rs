@@ -292,8 +292,61 @@ pub mod cs_sqrt {
                 uint i = gl_GlobalInvocationID.x;
                 if (i >= length) return;
                 
-                // Karekök hesaplama (Negatif sayı patlamasına karşı 0 sınırıyla korumalı)
                 b[i] = sqrt(max(a[i], 0.0));
+            }
+        ",
+    }
+}
+pub mod cs_matmul_relu {
+    vulkano_shaders::shader! {
+        ty: "compute",
+        src: r"
+            #version 450
+            layout(local_size_x = 8, local_size_y = 8) in;
+
+            layout(set = 0, binding = 0) buffer MatA { float a[]; };
+            layout(set = 0, binding = 1) buffer MatB { float b[]; };
+            layout(set = 0, binding = 2) buffer MatC { float c[]; };
+            layout(set = 0, binding = 3) uniform Meta { uint M; uint K; uint N; };
+
+            void main() {
+                uint row = gl_GlobalInvocationID.x;
+                uint col = gl_GlobalInvocationID.y;
+                if (row >= M || col >= N) return;
+
+                float sum = 0.0;
+                for (uint k = 0; k < K; k++) {
+                    sum += a[row * K + k] * b[k * N + col];
+                }
+                
+                c[row * N + col] = max(0.0, sum);
+            }
+        ",
+    }
+}
+pub mod cs_rmsprop_update {
+    vulkano_shaders::shader! {
+        ty: "compute",
+        src: r"
+            #version 450
+            layout(local_size_x = 64) in;
+
+            layout(set = 0, binding = 0) buffer Weight { float w[]; };
+            layout(set = 0, binding = 1) buffer Cache { float c[]; };
+            layout(set = 0, binding = 2) buffer Grad { float dw[]; };
+            layout(set = 0, binding = 3) uniform Meta { 
+                uint length; 
+                float learning_rate; 
+                float decay; 
+                float epsilon; 
+            };
+
+            void main() {
+                uint i = gl_GlobalInvocationID.x;
+                if (i >= length) return;
+
+                c[i] = decay * c[i] + (1.0 - decay) * (dw[i] * dw[i]);
+                w[i] -= (learning_rate * dw[i]) / (sqrt(c[i]) + epsilon);
             }
         ",
     }

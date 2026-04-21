@@ -29,6 +29,8 @@ pub enum BuiltInShaderType {
     Transpose,
     Sigmoid,
     SigmoidDerivative,
+    MatmulRelu,
+    RmsPropUpdate,
 }
 
 pub struct BuiltInShader {
@@ -59,6 +61,10 @@ impl BuiltInShader {
             BuiltInShaderType::SigmoidDerivative => {
                 cs_sigmoid_derivative::load(ctx.device.clone()).unwrap()
             }
+            BuiltInShaderType::MatmulRelu => cs_matmul_relu::load(ctx.device.clone()).unwrap(),
+            BuiltInShaderType::RmsPropUpdate => {
+                cs_rmsprop_update::load(ctx.device.clone()).unwrap()
+            }
         }
     }
 }
@@ -74,6 +80,15 @@ struct MatMeta {
     m: u32,
     k: u32,
     n: u32,
+}
+
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
+struct RmsPropMeta {
+    length: u32,
+    learning_rate: f32,
+    decay: f32,
+    epsilon: f32,
 }
 
 impl Operation {
@@ -105,7 +120,6 @@ impl Operation {
     // =========================================================================
     //                         Internal helpers
     // =========================================================================
-
     fn staging_upload(&self, data: &[f32]) -> Subbuffer<[f32]> {
         let buf = Buffer::new_slice::<f32>(
             self.context.memory_allocator.clone(),
@@ -128,7 +142,6 @@ impl Operation {
 
         buf
     }
-
     fn device_storage(&self, len: usize, extra_usage: BufferUsage) -> Subbuffer<[f32]> {
         Buffer::new_slice::<f32>(
             self.context.memory_allocator.clone(),
@@ -144,7 +157,6 @@ impl Operation {
         )
         .expect("Device storage buffer cannot be created")
     }
-
     fn upload_input(
         &self,
         builder: &mut AutoCommandBufferBuilder<vulkano::command_buffer::PrimaryAutoCommandBuffer>,
@@ -157,7 +169,6 @@ impl Operation {
             .expect("copy_buffer failed");
         device_buf
     }
-
     fn uniform<T>(&self, data: T) -> Subbuffer<T>
     where
         T: vulkano::buffer::BufferContents,
@@ -177,7 +188,6 @@ impl Operation {
         )
         .expect("Uniform buffer cannot be created")
     }
-
     fn readback(
         &self,
         builder: &mut AutoCommandBufferBuilder<vulkano::command_buffer::PrimaryAutoCommandBuffer>,
@@ -205,7 +215,6 @@ impl Operation {
 
         host_buf
     }
-
     fn new_builder(
         &self,
     ) -> AutoCommandBufferBuilder<vulkano::command_buffer::PrimaryAutoCommandBuffer> {
@@ -216,7 +225,6 @@ impl Operation {
         )
         .expect("Command buffer builder cannot be created")
     }
-
     fn submit_and_wait(
         &self,
         builder: AutoCommandBufferBuilder<vulkano::command_buffer::PrimaryAutoCommandBuffer>,
@@ -230,7 +238,6 @@ impl Operation {
             .wait(None)
             .expect("Fence wait failed");
     }
-
     pub fn run(&self, a: &[f32], b: &[f32]) -> Vec<f32> {
         let mut builder = self.new_builder();
 
@@ -280,7 +287,6 @@ impl Operation {
             .to_vec();
         res
     }
-
     pub fn run_relu(&self, a: &[f32]) -> Vec<f32> {
         let mut builder = self.new_builder();
 
@@ -322,7 +328,6 @@ impl Operation {
         let res = host_output.read().expect("Readback map failed").to_vec();
         res
     }
-
     pub fn run_matmul(&self, a: &[f32], b: &[f32], m: u32, k: u32, n: u32) -> Vec<f32> {
         let mut builder = self.new_builder();
 
@@ -365,7 +370,6 @@ impl Operation {
         let res = host_output.read().expect("Readback map failed").to_vec();
         res
     }
-
     pub fn run_fn(&self, a: &[f32]) -> Vec<f32> {
         let mut builder = self.new_builder();
 
