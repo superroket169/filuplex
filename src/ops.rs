@@ -91,6 +91,28 @@ struct RmsPropMeta {
     epsilon: f32,
 }
 
+pub struct GpuBuffer {
+    inner: Subbuffer<[f32]>,
+}
+
+// user simplyfying:
+impl GpuBuffer {
+    pub fn from_cpu(data: &[f32], ctx: &Arc<Context>) -> Self {
+        let buf = to_buf(ctx, data.to_vec());
+        GpuBuffer { inner: buf }
+    }
+
+    // GPU'dan CPU'ya veri çeker
+    pub fn to_cpu(&self, ctx: &Arc<Context>) -> Vec<f32> {
+        from_buf(ctx, self.inner.clone())
+    }
+
+    // helper
+    pub(crate) fn internal(&self) -> Subbuffer<[f32]> {
+        self.inner.clone()
+    }
+}
+
 impl Operation {
     pub fn new(ctx: Arc<Context>, shader: Arc<ShaderModule>) -> Self {
         let entry_point = shader.entry_point("main").unwrap();
@@ -244,7 +266,10 @@ impl Operation {
             .wait(None)
             .expect("Fence wait failed");
     }
-    pub fn run(&self, a: Subbuffer<[f32]>, b: Subbuffer<[f32]>) -> Subbuffer<[f32]> {
+    pub fn run(&self, a_input: &GpuBuffer, b_input: &GpuBuffer) -> Subbuffer<[f32]> {
+        let a = a_input.internal();
+        let b = b_input.internal();
+
         let mut builder = self.new_builder();
 
         let output = self.device_storage(
@@ -286,7 +311,9 @@ impl Operation {
         self.submit_and_wait(builder);
         output
     }
-    pub fn run_relu(&self, a: Subbuffer<[f32]>) -> Subbuffer<[f32]> {
+    pub fn run_relu(&self, a_input: &GpuBuffer) -> Subbuffer<[f32]> {
+        let a = a_input.internal();
+
         let mut builder = self.new_builder();
 
         let output = self.device_storage(
@@ -330,12 +357,15 @@ impl Operation {
     }
     pub fn run_matmul(
         &self,
-        a: Subbuffer<[f32]>,
-        b: Subbuffer<[f32]>,
+        a_input: &GpuBuffer,
+        b_input: &GpuBuffer,
         m: u32,
         k: u32,
         n: u32,
     ) -> Subbuffer<[f32]> {
+        let a = a_input.internal();
+        let b = b_input.internal();
+
         let mut builder = self.new_builder();
 
         let output = self.device_storage((m * n) as usize, BufferUsage::TRANSFER_SRC);
@@ -374,7 +404,9 @@ impl Operation {
 
         output
     }
-    pub fn run_fn(&self, a: Subbuffer<[f32]>) -> Subbuffer<[f32]> {
+    pub fn run_fn(&self, a_input: &GpuBuffer) -> Subbuffer<[f32]> {
+        let a = a_input.internal();
+
         let mut builder = self.new_builder();
 
         let length_buf = self.uniform::<u32>(a.len() as u32);
@@ -419,12 +451,15 @@ impl Operation {
     }
     pub fn run_matmul_relu(
         &self,
-        a: Subbuffer<[f32]>,
-        b: Subbuffer<[f32]>,
+        a_input: &GpuBuffer,
+        b_input: &GpuBuffer,
         m: u32,
         k: u32,
         n: u32,
     ) -> Subbuffer<[f32]> {
+        let a = a_input.internal();
+        let b = b_input.internal();
+
         let mut builder = self.new_builder();
         let output = self.device_storage(
             (m * n) as usize,
@@ -469,6 +504,7 @@ impl Operation {
     }
 }
 
+// helpers more
 fn to_buf(ctx: &Arc<Context>, data: Vec<f32>) -> Subbuffer<[f32]> {
     Buffer::from_iter(
         ctx.memory_allocator.clone(),
@@ -487,7 +523,6 @@ fn to_buf(ctx: &Arc<Context>, data: Vec<f32>) -> Subbuffer<[f32]> {
     )
     .expect("VRAM Allocation Failed")
 }
-
 fn from_buf(ctx: &Arc<Context>, vram_buf: Subbuffer<[f32]>) -> Vec<f32> {
     let staging_buf = Buffer::new_slice::<f32>(
         ctx.memory_allocator.clone(),
