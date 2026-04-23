@@ -142,6 +142,7 @@ impl Operation {
 
         buf
     }
+
     fn device_storage(&self, len: usize, extra_usage: BufferUsage) -> Subbuffer<[f32]> {
         Buffer::new_slice::<f32>(
             self.context.memory_allocator.clone(),
@@ -157,7 +158,9 @@ impl Operation {
         )
         .expect("Device storage buffer cannot be created")
     }
-    fn upload_input(
+
+    // fn uniform<T>() for user
+    pub fn upload_input(
         &self,
         builder: &mut AutoCommandBufferBuilder<vulkano::command_buffer::PrimaryAutoCommandBuffer>,
         data: &[f32],
@@ -169,6 +172,9 @@ impl Operation {
             .expect("copy_buffer failed");
         device_buf
     }
+
+    // packs a data to Subbuffer
+    // it works very well for optimization
     fn uniform<T>(&self, data: T) -> Subbuffer<T>
     where
         T: vulkano::buffer::BufferContents,
@@ -420,16 +426,13 @@ impl Operation {
         n: u32,
     ) -> Subbuffer<[f32]> {
         let mut builder = self.new_builder();
-
         let output = self.device_storage(
             (m * n) as usize,
             BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC,
         );
 
         let meta_buf = self.uniform::<MatMeta>(MatMeta { m, k, n });
-
         let stage_layout = self.pipeline.layout().set_layouts().get(0).unwrap();
-
         let descriptor_set = DescriptorSet::new(
             self.context.descriptor_set_allocator.clone(),
             stage_layout.clone(),
@@ -462,7 +465,65 @@ impl Operation {
         }
 
         self.submit_and_wait(builder);
-
         output
     }
+}
+
+fn to_buf(ctx: &Arc<Context>, data: Vec<f32>) -> Subbuffer<[f32]> {
+    Buffer::from_iter(
+        ctx.memory_allocator.clone(),
+        BufferCreateInfo {
+            usage: BufferUsage::STORAGE_BUFFER
+                | BufferUsage::TRANSFER_SRC
+                | BufferUsage::TRANSFER_DST,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+            ..Default::default()
+        },
+        data,
+    )
+    .expect("VRAM Allocation Failed")
+}
+
+fn from_buf(ctx: &Arc<Context>, vram_buf: Subbuffer<[f32]>) -> Vec<f32> {
+    let staging_buf = Buffer::new_slice::<f32>(
+        ctx.memory_allocator.clone(),
+        BufferCreateInfo {
+            usage: BufferUsage::TRANSFER_DST,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_HOST
+                | MemoryTypeFilter::HOST_RANDOM_ACCESS,
+            ..Default::default()
+        },
+        vram_buf.len() as vulkano::DeviceSize,
+    )
+    .expect("Staging buffer creation failed");
+
+    let mut builder = AutoCommandBufferBuilder::primary(
+        ctx.command_buffer_allocator.clone(),
+        ctx.queue.queue_family_index(),
+        CommandBufferUsage::OneTimeSubmit,
+    )
+    .unwrap();
+
+    builder
+        .copy_buffer(CopyBufferInfo::buffers(vram_buf, staging_buf.clone()))
+        .unwrap();
+
+    let command_buffer = builder.build().unwrap();
+    let future = vulkano::sync::now(ctx.device.clone())
+        .then_execute(ctx.queue.clone(), command_buffer)
+        .unwrap()
+        .then_signal_fence_and_flush()
+        .unwrap();
+
+    future.wait(None).unwrap();
+
+    let ret = staging_buf.read().expect("VRAM Read Failed").to_vec();
+    ret
 }

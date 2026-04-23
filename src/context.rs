@@ -31,14 +31,12 @@ impl Context {
             InstanceCreateInfo::default(),
         )
         .expect("Instance cannot be created");
-
         let physical_devices: Vec<_> = instance
             .enumerate_physical_devices()
             .expect("Cannot list GPUs")
             .collect();
 
         assert!(!physical_devices.is_empty(), "No GPU found");
-
         let physical_device = match &pref {
             GpuPref::Default => physical_devices[0].clone(),
             GpuPref::Index(i) => physical_devices
@@ -54,15 +52,12 @@ impl Context {
                 .unwrap_or(&physical_devices[0])
                 .clone(),
         };
-
         println!("GPU: {}", physical_device.properties().device_name);
-
         let queue_family_index = physical_device
             .queue_family_properties()
             .iter()
             .position(|p| p.queue_flags.contains(QueueFlags::COMPUTE))
             .expect("No compute queue found") as u32;
-
         let (device, mut queues) = Device::new(
             physical_device.clone(),
             DeviceCreateInfo {
@@ -76,19 +71,15 @@ impl Context {
         .expect("Device cannot be created");
 
         let queue = queues.next().expect("No queue");
-
         let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
-
         let command_buffer_allocator = Arc::new(StandardCommandBufferAllocator::new(
             device.clone(),
             Default::default(),
         ));
-
         let descriptor_set_allocator = Arc::new(StandardDescriptorSetAllocator::new(
             device.clone(),
             Default::default(),
         ));
-
         Context {
             gpu_pref: pref,
             instance: instance,
