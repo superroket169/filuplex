@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::fs;
 use std::sync::Arc;
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferInfo};
@@ -8,6 +9,7 @@ use vulkano::pipeline::compute::ComputePipelineCreateInfo;
 use vulkano::pipeline::layout::PipelineDescriptorSetLayoutCreateInfo;
 use vulkano::pipeline::{ComputePipeline, Pipeline, PipelineLayout, PipelineShaderStageCreateInfo};
 use vulkano::shader::ShaderModule;
+use vulkano::shader::ShaderModuleCreateInfo;
 use vulkano::sync::{self, GpuFuture};
 use vulkano::DeviceSize;
 
@@ -40,6 +42,16 @@ pub struct BuiltInShader {
 impl BuiltInShader {
     pub fn new(shader_type: BuiltInShaderType) -> Self {
         BuiltInShader { shader_type }
+    }
+
+    pub fn load_from_file(ctx: &Arc<Context>, path: &str) -> Arc<ShaderModule> {
+        let bytes = fs::read(path).expect("Belirtilen shader dosyası (.spv) bulunamadı!");
+
+        let words: &[u32] = bytemuck::cast_slice(&bytes);
+        unsafe {
+            ShaderModule::new(ctx.device.clone(), ShaderModuleCreateInfo::new(words))
+                .expect("SPIR-V modülü GPU'ya yüklenirken çöktü! Dosya bozuk olabilir.")
+        }
     }
 
     pub fn load(&self, ctx: &Arc<Context>) -> Arc<ShaderModule> {
