@@ -92,29 +92,27 @@ struct RmsPropMeta {
 }
 
 pub struct GpuBuffer {
-    inner: Subbuffer<[f32]>,
+    pub(crate) inner: Subbuffer<[f32]>,
 }
 
-// user simplyfying:
 impl GpuBuffer {
     pub fn from_cpu(data: &[f32], ctx: &Arc<Context>) -> Self {
-        let buf = to_buf(ctx, data.to_vec());
-        GpuBuffer { inner: buf }
+        GpuBuffer {
+            inner: crate::ops::to_buf(ctx, data.to_vec()),
+        }
     }
 
-    // GPU'dan CPU'ya veri çeker
     pub fn to_cpu(&self, ctx: &Arc<Context>) -> Vec<f32> {
-        from_buf(ctx, self.inner.clone())
+        crate::ops::from_buf(ctx, self.inner.clone())
     }
 
-    // helper
     pub(crate) fn internal(&self) -> Subbuffer<[f32]> {
         self.inner.clone()
     }
 }
 
 impl Operation {
-    pub fn new(ctx: Arc<Context>, shader: Arc<ShaderModule>) -> Self {
+    pub fn new_from_shader(ctx: Arc<Context>, shader: Arc<ShaderModule>) -> Self {
         let entry_point = shader.entry_point("main").unwrap();
         let stage = PipelineShaderStageCreateInfo::new(entry_point.clone());
 
@@ -135,6 +133,34 @@ impl Operation {
 
         Operation {
             context: ctx,
+            pipeline,
+        }
+    }
+
+    pub fn new(ctx: &Arc<Context>, shader_type: BuiltInShaderType) -> Self {
+        let shader_module = BuiltInShader::new(shader_type).load(ctx);
+        let entry_point = shader_module
+            .entry_point("main")
+            .expect("EntryPoint 'main' not found");
+        let stage = PipelineShaderStageCreateInfo::new(entry_point);
+
+        let layout = PipelineLayout::new(
+            ctx.device.clone(),
+            PipelineDescriptorSetLayoutCreateInfo::from_stages([&stage])
+                .into_pipeline_layout_create_info(ctx.device.clone())
+                .unwrap(),
+        )
+        .unwrap();
+
+        let pipeline = ComputePipeline::new(
+            ctx.device.clone(),
+            None,
+            ComputePipelineCreateInfo::stage_layout(stage, layout),
+        )
+        .unwrap();
+
+        Operation {
+            context: ctx.clone(),
             pipeline,
         }
     }
@@ -266,7 +292,7 @@ impl Operation {
             .wait(None)
             .expect("Fence wait failed");
     }
-    pub fn run(&self, a_input: &GpuBuffer, b_input: &GpuBuffer) -> Subbuffer<[f32]> {
+    pub fn run(&self, a_input: &GpuBuffer, b_input: &GpuBuffer) -> GpuBuffer {
         let a = a_input.internal();
         let b = b_input.internal();
 
@@ -309,9 +335,9 @@ impl Operation {
         }
 
         self.submit_and_wait(builder);
-        output
+        GpuBuffer { inner: output }
     }
-    pub fn run_relu(&self, a_input: &GpuBuffer) -> Subbuffer<[f32]> {
+    pub fn run_relu(&self, a_input: &GpuBuffer) -> GpuBuffer {
         let a = a_input.internal();
 
         let mut builder = self.new_builder();
@@ -353,7 +379,7 @@ impl Operation {
 
         self.submit_and_wait(builder);
 
-        output
+        GpuBuffer { inner: output }
     }
     pub fn run_matmul(
         &self,
@@ -362,13 +388,16 @@ impl Operation {
         m: u32,
         k: u32,
         n: u32,
-    ) -> Subbuffer<[f32]> {
+    ) -> GpuBuffer {
         let a = a_input.internal();
         let b = b_input.internal();
 
         let mut builder = self.new_builder();
 
-        let output = self.device_storage((m * n) as usize, BufferUsage::TRANSFER_SRC);
+        let output = self.device_storage(
+            (m * n) as usize,
+            BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC,
+        );
         let meta_buf = self.uniform::<MatMeta>(MatMeta { m, k, n });
 
         let stage_layout = self.pipeline.layout().set_layouts().get(0).unwrap();
@@ -402,9 +431,9 @@ impl Operation {
 
         self.submit_and_wait(builder);
 
-        output
+        GpuBuffer { inner: output }
     }
-    pub fn run_fn(&self, a_input: &GpuBuffer) -> Subbuffer<[f32]> {
+    pub fn run_fn(&self, a_input: &GpuBuffer) -> GpuBuffer {
         let a = a_input.internal();
 
         let mut builder = self.new_builder();
@@ -447,7 +476,7 @@ impl Operation {
 
         self.submit_and_wait(builder);
 
-        output
+        GpuBuffer { inner: output }
     }
     pub fn run_matmul_relu(
         &self,
@@ -456,7 +485,7 @@ impl Operation {
         m: u32,
         k: u32,
         n: u32,
-    ) -> Subbuffer<[f32]> {
+    ) -> GpuBuffer {
         let a = a_input.internal();
         let b = b_input.internal();
 
@@ -500,7 +529,7 @@ impl Operation {
         }
 
         self.submit_and_wait(builder);
-        output
+        GpuBuffer { inner: output }
     }
 }
 
@@ -511,7 +540,8 @@ fn to_buf(ctx: &Arc<Context>, data: Vec<f32>) -> Subbuffer<[f32]> {
         BufferCreateInfo {
             usage: BufferUsage::STORAGE_BUFFER
                 | BufferUsage::TRANSFER_SRC
-                | BufferUsage::TRANSFER_DST,
+                | BufferUsage::TRANSFER_DST
+                | BufferUsage::UNIFORM_BUFFER,
             ..Default::default()
         },
         AllocationCreateInfo {
