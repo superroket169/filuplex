@@ -36,7 +36,7 @@ impl ComputeGraphBuilder {
         let builder = AutoCommandBufferBuilder::primary(
             ctx.command_buffer_allocator.clone(),
             ctx.queue.queue_family_index(),
-            CommandBufferUsage::MultipleSubmit,
+            CommandBufferUsage::SimultaneousUse, // işte burası
         )
         .unwrap();
 
