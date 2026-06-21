@@ -1,9 +1,7 @@
 use crate::context::Context;
 use crate::ops::GpuBuffer;
 use std::sync::Arc;
-use vulkano::command_buffer::{
-    AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer,
-};
+use vulkano::command_buffer::{AutoCommandBufferBuilder, PrimaryAutoCommandBuffer};
 use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
 use vulkano::pipeline::{Pipeline, PipelineBindPoint};
 use vulkano::shader::ShaderModule;
@@ -16,13 +14,20 @@ pub struct ExecutableGraph {
 
 impl ExecutableGraph {
     pub fn execute(&self) {
-        vulkano::sync::now(self.ctx.device.clone())
-            .then_execute(self.ctx.queue.clone(), self.command_buffer.clone())
-            .unwrap()
-            .then_signal_fence_and_flush()
-            .unwrap()
-            .wait(None)
-            .expect("GPU calculation crashed!");
+        println!("--> Shader shadering...");
+        {
+            let mut future = vulkano::sync::now(self.ctx.device.clone())
+                .then_execute(self.ctx.queue.clone(), self.command_buffer.clone())
+                .unwrap()
+                .then_signal_fence_and_flush()
+                .unwrap();
+
+            future.wait(None).unwrap();
+            future.cleanup_finished();
+        }
+        unsafe {
+            self.ctx.device.wait_idle().unwrap();
+        };
     }
 }
 
@@ -36,7 +41,7 @@ impl ComputeGraphBuilder {
         let builder = AutoCommandBufferBuilder::primary(
             ctx.command_buffer_allocator.clone(),
             ctx.queue.queue_family_index(),
-            vulkano::command_buffer::CommandBufferUsage::SimultaneousUse,
+            vulkano::command_buffer::CommandBufferUsage::OneTimeSubmit,
         )
         .unwrap();
 
@@ -101,10 +106,30 @@ impl ComputeGraphBuilder {
     }
 
     pub fn build(self) -> ExecutableGraph {
-        let command_buffer = self.builder.build().unwrap();
+        let command_buffer = self.builder.build().expect("build expoid");
         ExecutableGraph {
             ctx: self.ctx,
             command_buffer,
+        }
+    }
+}
+
+pub struct ExecutableGraphQueue {
+    graphs: Vec<ExecutableGraph>,
+}
+
+impl ExecutableGraphQueue {
+    pub fn new() -> Self {
+        Self { graphs: Vec::new() }
+    }
+
+    pub fn push(&mut self, graph: ExecutableGraph) {
+        self.graphs.push(graph);
+    }
+
+    pub fn execute(&self) {
+        for graph in &self.graphs {
+            graph.execute();
         }
     }
 }
