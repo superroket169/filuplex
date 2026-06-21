@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::sync::Arc;
+use std::thread::AccessError;
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferInfo};
 use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
@@ -33,29 +34,40 @@ pub enum BuiltInShaderType {
     SigmoidDerivative,
     MatmulRelu,
     RmsPropUpdate,
+    LoadedShader,
 }
 
 pub struct BuiltInShader {
     pub shader_type: BuiltInShaderType,
+    pub loaded_shader: Option<Arc<ShaderModule>>,
 }
 
 impl BuiltInShader {
     pub fn new(shader_type: BuiltInShaderType) -> Self {
-        BuiltInShader { shader_type }
+        BuiltInShader {
+            shader_type,
+            loaded_shader: None,
+        }
     }
 
-    pub fn load_from_file(ctx: &Arc<Context>, path: &str) -> Arc<ShaderModule> {
+    pub fn load_from_file(ctx: &Arc<Context>, path: &str) -> Self {
         let bytes = fs::read(path).expect("Belirtilen shader dosyası (.spv) bulunamadı!");
-
         let words: &[u32] = bytemuck::cast_slice(&bytes);
-        unsafe {
+
+        let shader_module = unsafe {
             ShaderModule::new(ctx.device.clone(), ShaderModuleCreateInfo::new(words))
                 .expect("SPIR-V modülü GPU'ya yüklenirken çöktü! Dosya bozuk olabilir.")
+        };
+
+        BuiltInShader {
+            shader_type: BuiltInShaderType::LoadedShader,
+            loaded_shader: Some(shader_module),
         }
     }
 
     pub fn load(&self, ctx: &Arc<Context>) -> Arc<ShaderModule> {
         match self.shader_type {
+            BuiltInShaderType::LoadedShader => self.loaded_shader.clone().unwrap(),
             BuiltInShaderType::Addition => cs_add::load(ctx.device.clone()).unwrap(),
             BuiltInShaderType::Multiply => cs_mul::load(ctx.device.clone()).unwrap(),
             BuiltInShaderType::Sqrt => cs_sqrt::load(ctx.device.clone()).unwrap(),
@@ -103,6 +115,7 @@ struct RmsPropMeta {
     epsilon: f32,
 }
 
+#[derive(Clone)]
 pub struct GpuBuffer {
     pub(crate) inner: Subbuffer<[f32]>,
 }
