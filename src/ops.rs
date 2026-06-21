@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::sync::Arc;
-use std::thread::AccessError;
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferInfo};
 use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
@@ -51,12 +50,14 @@ impl BuiltInShader {
     }
 
     pub fn load_from_file(ctx: &Arc<Context>, path: &str) -> Self {
-        let bytes = fs::read(path).expect("Belirtilen shader dosyası (.spv) bulunamadı!");
+        let bytes =
+            fs::read(path).expect("An error occurred with the specified shader file (.spv)!");
         let words: &[u32] = bytemuck::cast_slice(&bytes);
 
         let shader_module = unsafe {
-            ShaderModule::new(ctx.device.clone(), ShaderModuleCreateInfo::new(words))
-                .expect("SPIR-V modülü GPU'ya yüklenirken çöktü! Dosya bozuk olabilir.")
+            ShaderModule::new(ctx.device.clone(), ShaderModuleCreateInfo::new(words)).expect(
+                "The SPIR-V module crashed while loading to the GPU! The file may be corrupted.",
+            )
         };
 
         BuiltInShader {
@@ -129,6 +130,10 @@ impl GpuBuffer {
 
     pub fn to_cpu(&self, ctx: &Arc<Context>) -> Vec<f32> {
         crate::ops::from_buf(ctx, self.inner.clone())
+    }
+
+    pub fn write_from_cpu(&self, ctx: &Arc<Context>, data: &[f32]) {
+        crate::ops::write_to_buf(ctx, self.inner.clone(), data);
     }
 
     pub(crate) fn internal(&self) -> Subbuffer<[f32]> {
@@ -616,4 +621,41 @@ fn from_buf(ctx: &Arc<Context>, vram_buf: Subbuffer<[f32]>) -> Vec<f32> {
 
     let ret = staging_buf.read().expect("VRAM Read Failed").to_vec();
     ret
+}
+
+fn write_to_buf(ctx: &Arc<Context>, vram_buf: Subbuffer<[f32]>, data: &[f32]) {
+    let staging_buf = Buffer::from_iter(
+        ctx.memory_allocator.clone(),
+        BufferCreateInfo {
+            usage: BufferUsage::TRANSFER_SRC,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_HOST
+                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+            ..Default::default()
+        },
+        data.to_vec(),
+    )
+    .expect("Staging Buffer Creation Failed");
+
+    let mut builder = AutoCommandBufferBuilder::primary(
+        ctx.command_buffer_allocator.clone(),
+        ctx.queue.queue_family_index(),
+        CommandBufferUsage::OneTimeSubmit,
+    )
+    .unwrap();
+
+    builder
+        .copy_buffer(CopyBufferInfo::buffers(staging_buf, vram_buf))
+        .unwrap();
+
+    let command_buffer = builder.build().unwrap();
+    let future = vulkano::sync::now(ctx.device.clone())
+        .then_execute(ctx.queue.clone(), command_buffer)
+        .unwrap()
+        .then_signal_fence_and_flush()
+        .unwrap();
+
+    future.wait(None).unwrap();
 }

@@ -22,7 +22,7 @@ impl ExecutableGraph {
             .then_signal_fence_and_flush()
             .unwrap()
             .wait(None)
-            .expect("GPU hesaplaması çöktü!");
+            .expect("GPU calculation crashed!");
     }
 }
 
